@@ -60,10 +60,15 @@ def run_step1(csv_path: str | Path = DEFAULT_CSV_PATH, criterion: str = "bic"):
     print("=" * 70)
     pelt_result = pelt.run_pelt(df_train, criterion=criterion)
 
-    print(f"  - 검정력 분석 기반 최소 표본(그룹당 이탈 건수): "
-          f"{pelt_result.min_group_churn_count}건")
-    print(f"  - 위 값을 개월 수로 환산한 '느슨한 시작값': "
-          f"약 {pelt_result.min_segment_months:.1f}개월")
+    print(f"  - 검정력 분석 기반 표본충분성 기준(그룹당 '전체 표본 수', 참고치): "
+          f"{pelt_result.min_group_sample_size}명")
+    print(f"    -> 개월 환산 약 {pelt_result.min_segment_months_reference:.1f}개월, "
+          f"기술적 상한 K≈{pelt_result.technical_k_upper_bound:.1f}")
+    print(f"    (이 값은 1단계 PELT의 제약으로 쓰지 않습니다. 표본충분성")
+    print(f"     실제 판정은 2단계에서 '전체 표본 수' 기준으로 수행됩니다")
+    print(f"     -- 이탈 건수 기준이 아님에 유의. 표본충분성 논리 재검증 결과 반영)")
+    print(f"  - 1단계 PELT에 실제 사용된 min_size: {pelt_result.min_size_used}개월 "
+          f"(k_search_range 최대 K까지 후보가 나올 수 있도록 보장하는 느슨한 가드레일)")
     print(f"  - 탐색한 K(세그먼트 수) 범위: {min(pelt_result.k_search_range)}"
           f"~{max(pelt_result.k_search_range)}")
     print(f"  - 실제 탐지된 후보 개수: {len(pelt_result.candidates)}개")
@@ -79,8 +84,8 @@ def run_step1(csv_path: str | Path = DEFAULT_CSV_PATH, criterion: str = "bic"):
 
     print()
     print("  ※ 위 후보들은 '통계적 제안'일 뿐 최종 채택이 아닙니다.")
-    print("    사후 표본 점검(이탈 392건 미달 구간 통합 여부)과 머신러닝")
-    print("    기반 교차검증 성능 비교는 분석 A 2단계에서 수행됩니다.")
+    print("    사후 표본 점검('전체 표본 수' 393명 미달 구간 통합 여부)과")
+    print("    머신러닝 기반 교차검증 성능 비교는 분석 A 2단계에서 수행됩니다.")
     print("    (기획구현.md 3번)")
 
     return {
@@ -121,8 +126,8 @@ def run_step2(
     )
 
     print()
-    print(f"  - 표본충분성 임계값(검정력 분석, 1단계와 동일 출처): "
-          f"{result.min_group_churn_count}건")
+    print(f"  - 표본충분성 임계값('전체 표본 수' 기준, 1단계와 동일 출처): "
+          f"{result.min_group_sample_size}명")
 
     print()
     print("  [a. XGBoost 교차검증 성능 (K=1 베이스라인 포함)]")
@@ -130,7 +135,7 @@ def run_step2(
     print(cv_table.to_string(index=False))
 
     print()
-    print("  [b. 사후 표본 점검: 392건 미달 구간 통합 전/후 비교]")
+    print("  [b. 사후 표본 점검: '전체 표본 수' 393명 미달 구간 통합 전/후 비교]")
     merge_table = result.merge_summary_table()
     print(merge_table.to_string(index=False))
     for m in result.merge_results:

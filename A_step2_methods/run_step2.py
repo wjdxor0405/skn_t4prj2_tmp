@@ -4,11 +4,13 @@
 하나의 함수로 묶어서 실행한다. main.py가 직접 이 모듈만 호출하면 되도록
 인터페이스를 단순화하는 역할.
 
-절차 (기획구현.md 3, 4번 그대로):
-  1. (4번-①) 검정력 분석으로 임계값(392건) 계산 -- A_step1_methods.pelt 재사용
+절차 (기획구현.md 3, 4번 + 표본충분성 정정 이력 반영):
+  1. (4번-①) 검정력 분석으로 임계값(393명, "전체 표본 수" 기준 -- 이탈
+     건수 아님) 계산 -- A_step1_methods.pelt 재사용
   2. (3번) 1단계가 제안한 K=2~8 후보별로:
        a. XGBoost 교차검증 성능 측정 (xgboost_cv.py)
-       b. 사후 표본 점검 + 392건 미달 구간 통합 (segment_merge.py)
+       b. 사후 표본 점검 + 393명 미달 구간 통합 (segment_merge.py,
+          전체 표본 수 기준 -- 정정 이력 참고)
        c. 부트스트랩 변동계수(CV) 계산 (bootstrap_cv.py, 통합 "전" 원본 경계 기준)
   3. 위 표들을 모두 사람이 볼 수 있게 반환 -- 최종 K 채택은 자동화하지
      않고 사람이 종합 판단 (기획구현.md 4번-②)
@@ -35,7 +37,7 @@ import pelt  # noqa: E402
 class Step2Result:
     """분석 A 2단계 실행 결과 전체. 사람이 검토할 모든 표를 담는다."""
 
-    min_group_churn_count: int
+    min_group_sample_size: int
     cv_results: list  # list[xgboost_cv.CVResult]
     bootstrap_results: list  # list[bootstrap_cv.BootstrapCVResult]
     merge_results: list  # list[segment_merge.PostMergeResult], 1단계 후보별
@@ -87,10 +89,10 @@ def run_step2(
         1단계와 동일한 Train 데이터 (누수 방지를 위해 반드시 Train만 사용).
     pelt_result : pelt.PeltResult
         1단계(A_step1_methods.pelt.run_pelt) 실행 결과. K=2~8 후보들과
-        검정력 분석 기반 min_group_churn_count를 이미 담고 있다.
+        검정력 분석 기반 min_group_sample_size를 이미 담고 있다.
     """
     boundary_candidates = [c.boundaries_tenure for c in pelt_result.candidates]
-    min_group_churn_count = pelt_result.min_group_churn_count
+    min_group_sample_size = pelt_result.min_group_sample_size
 
     # a. XGBoost 교차검증 (K=1 베이스라인 포함, compare_candidates 내부 처리)
     cv_results = xgboost_cv.compare_candidates(
@@ -102,12 +104,13 @@ def run_step2(
         random_state=random_state,
     )
 
-    # b. 사후 표본 점검 + 392건 미달 구간 통합 (후보별로 개별 수행)
+    # b. 사후 표본 점검 + 393명("전체 표본 수" 기준) 미달 구간 통합
+    #    (후보별로 개별 수행, 정정 이력 참고 -- 이탈 건수 기준 아님)
     merge_results = [
         segment_merge.merge_undersized_segments(
             df_train,
             boundaries,
-            min_group_churn_count,
+            min_group_sample_size,
             tenure_col=tenure_col,
             churn_col=churn_col,
         )
@@ -126,7 +129,7 @@ def run_step2(
     )
 
     return Step2Result(
-        min_group_churn_count=min_group_churn_count,
+        min_group_sample_size=min_group_sample_size,
         cv_results=cv_results,
         bootstrap_results=bootstrap_results,
         merge_results=merge_results,
