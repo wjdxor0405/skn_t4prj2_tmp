@@ -21,7 +21,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 from scipy import stats
-from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.metrics import f1_score, roc_auc_score, precision_recall_curve
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.tree import DecisionTreeClassifier
 
@@ -61,23 +61,69 @@ def thresholds_to_bin_index(
     return idx
 
 
+def find_optimal_f1_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+) -> tuple[float, float]:
+    """
+    precision-recall curve 상의 모든 후보 threshold를 훑어
+    F1을 최대화하는 지점을 찾는다.
+
+    Returns
+    -------
+    best_threshold : F1을 최대화하는 확률 임계값 (0~1)
+    best_f1        : 그 지점에서의 F1 score
+    """
+    precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
+
+    # precision_recall_curve는 thresholds가 precision/recall보다 1개 적음
+    precision = precision[:-1]
+    recall    = recall[:-1]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f1_scores = np.where(
+            (precision + recall) > 0,
+            2 * precision * recall / (precision + recall),
+            0.0,
+        )
+
+    if len(f1_scores) == 0:
+        return 0.5, 0.0
+
+    best_idx = int(np.argmax(f1_scores))
+    return round(float(thresholds[best_idx]), 4), round(float(f1_scores[best_idx]), 4)
+
+
 def eval_predictive(
     thresholds: list[float],
     X: np.ndarray,
     y: np.ndarray,
     cv: int = 5,
 ) -> dict[str, float]:
-    """F1 / AUC-ROC 평가."""
+    """
+    F1 / AUC-ROC 평가.
+
+    F1은 두 가지를 함께 반환:
+    - f1            : 기본 임계값 0.5에서의 F1 (기존 출력과 동일)
+    - f1_optimal    : precision-recall curve에서 F1을 최대화하는 임계값에서의 F1
+    - f1_opt_thresh : 그 최적 임계값 (확률 기준, 0~1)
+    """
     if not thresholds:
-        return {"f1": 0.0, "auc": 0.5, "predictive_score": 0.25}
+        return {
+            "f1": 0.0, "auc": 0.5, "predictive_score": 0.25,
+            "f1_optimal": 0.0, "f1_opt_thresh": 0.5,
+        }
 
     X_bin = thresholds_to_bin_index(X, thresholds).reshape(-1, 1)
     n_bins = len(np.unique(X_bin))
 
     if n_bins < 2:
-        return {"f1": 0.0, "auc": 0.5, "predictive_score": 0.25}
+        return {
+            "f1": 0.0, "auc": 0.5, "predictive_score": 0.25,
+            "f1_optimal": 0.0, "f1_opt_thresh": 0.5,
+        }
 
-    clf = DecisionTreeClassifier(max_depth=n_bins, random_state=42, class_weight='balanced')
+    clf = DecisionTreeClassifier(max_depth=n_bins, random_state=42)
     skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
 
     y_pred = cross_val_predict(clf, X_bin, y, cv=skf)
@@ -85,7 +131,16 @@ def eval_predictive(
 
     f1  = round(float(f1_score(y, y_pred, zero_division=0)), 4)
     auc = round(float(roc_auc_score(y, y_prob)), 4)
-    return {"f1": f1, "auc": auc, "predictive_score": round((f1 + auc) / 2, 4)}
+
+    f1_opt_thresh, f1_optimal = find_optimal_f1_threshold(y, y_prob)
+
+    return {
+        "f1":               f1,             # threshold=0.5 기준 (기존 출력)
+        "f1_optimal":       f1_optimal,      # 최적 threshold 기준 F1
+        "f1_opt_thresh":    f1_opt_thresh,   # 최적 threshold 값
+        "auc":              auc,
+        "predictive_score": round((f1 + auc) / 2, 4),
+    }
 
 
 def eval_significance(
@@ -294,9 +349,11 @@ class ComparisonReporter:
         for i, seg in enumerate(self._fmt_bins(result.thresholds).split("  |  ")):
             print(f"    구간 {i}: {seg}")
         print(f"\n  ── 예측 성능 ──")
-        print(f"    F1-Score : {result.predictive.get('f1', '-')}")
-        print(f"    AUC-ROC  : {result.predictive.get('auc', '-')}")
-        print(f"    종합     : {result.predictive.get('predictive_score', '-')}")
+        print(f"    F1-Score (threshold=0.5)   : {result.predictive.get('f1', '-')}")
+        print(f"    F1-Score (최적 threshold)  : {result.predictive.get('f1_optimal', '-')}"
+              f"   (threshold={result.predictive.get('f1_opt_thresh', '-')})")
+        print(f"    AUC-ROC                    : {result.predictive.get('auc', '-')}")
+        print(f"    종합                       : {result.predictive.get('predictive_score', '-')}")
         print(f"\n  ── 분기점 유의성 ──")
         print(f"    Mean p-value : {result.significance.get('mean_pval', '-')}")
         print(f"    Min  p-value : {result.significance.get('min_pval', '-')}")
@@ -314,7 +371,8 @@ class ComparisonReporter:
 
         header = (
             f"{'방법':<15} {'관점':<14} {'구간수':>5} "
-            f"{'F1':>7} {'AUC':>7} {'종합점수':>9} "
+            f"{'F1(0.5)':>8} {'F1(최적)':>9} {'최적Th':>7} "
+            f"{'AUC':>7} {'종합점수':>9} "
             f"{'Mean p-val':>12} {'임계값'}"
         )
         print(f"\n{header}")
@@ -323,7 +381,9 @@ class ComparisonReporter:
         for r in results:
             row = (
                 f"{r.method_name:<15} {r.variant:<14} {r.n_bins:>5} "
-                f"{r.predictive.get('f1', 0):>7.4f} "
+                f"{r.predictive.get('f1', 0):>8.4f} "
+                f"{r.predictive.get('f1_optimal', 0):>9.4f} "
+                f"{r.predictive.get('f1_opt_thresh', 0):>7.3f} "
                 f"{r.predictive.get('auc', 0):>7.4f} "
                 f"{r.predictive.get('predictive_score', 0):>9.4f} "
                 f"{r.significance.get('mean_pval', 1):>12.2e} "
@@ -351,6 +411,8 @@ class ComparisonReporter:
                 "n_bins":            r.n_bins,
                 "thresholds":        self._fmt_thr(r.thresholds),
                 "f1":                r.predictive.get("f1"),
+                "f1_optimal":        r.predictive.get("f1_optimal"),
+                "f1_opt_thresh":     r.predictive.get("f1_opt_thresh"),
                 "auc":               r.predictive.get("auc"),
                 "predictive_score":  r.predictive.get("predictive_score"),
                 "mean_pval":         r.significance.get("mean_pval"),
@@ -366,7 +428,7 @@ class ComparisonReporter:
 # 메인
 # ─────────────────────────────────────────────────────────────
 
-def main(csv_path: str = "WA_Fn-UseC_-Telco-Customer-Churn.csv") -> None:
+def main(csv_path: str = "/home/claude/WA_Fn-UseC_-Telco-Customer-Churn.csv") -> None:
     from tenure_binning import TenureBinner
 
     print("=" * 80)
