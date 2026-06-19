@@ -39,6 +39,11 @@ def build_churn_signal(
     unique_tenures : 정렬된 고유 tenure 값
     signal_1d     : 각 tenure 에서의 (스무딩된) churn rate
     """
+
+    # 호출 전에 NaN·이상값이 이미 제거된 X를 받는 것이 원칙이지만,
+    # 방어적으로 한 줄 추가
+    tenures = np.sort(np.unique(X[~np.isnan(X)])).astype(int)
+    
     tenures = np.sort(np.unique(X)).astype(int)
     rates = np.array([
         y[X == t].mean() if (X == t).sum() > 0 else 0.0
