@@ -1,9 +1,11 @@
 """
 실행 진입점.
-현재 구현 범위: 전처리(기획구현.md 1~2번) + 분석 A 1단계(기획구현.md 3번 1단계).
+현재 구현 범위:
+  - 전처리 (기획구현.md 1~2번)
+  - 분석 A 1단계 - PELT 통계적 변화점 탐지 (기획구현.md 3번 1단계)
+  - 분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합 (기획구현.md 3번 2단계)
 
-분석 A 2단계(머신러닝 기반 표본충분성 검증, A_step2_methods/xgboost.py 등)는
-아직 작성하지 않으므로 여기서 실행하지 않는다.
+분석 B, 보조 분석 Q, 예측모델 1·2·3단계(기획구현.md 5번)는 아직 작성하지 않는다.
 """
 
 from __future__ import annotations
@@ -15,9 +17,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_ROOT))
 sys.path.append(str(PROJECT_ROOT / "src"))
 sys.path.append(str(PROJECT_ROOT / "A_step1_methods"))
+sys.path.append(str(PROJECT_ROOT / "A_step2_methods"))
 
 from src.preprocessing import run_preprocessing, split_train_test  # noqa: E402
 from A_step1_methods import pelt  # noqa: E402
+from A_step2_methods import run_step2 as step2_module  # noqa: E402
 
 DEFAULT_CSV_PATH = PROJECT_ROOT / "data" / "WA_Fn-UseC_-Telco-Customer-Churn.csv"
 
@@ -76,8 +80,8 @@ def run_step1(csv_path: str | Path = DEFAULT_CSV_PATH, criterion: str = "bic"):
     print()
     print("  ※ 위 후보들은 '통계적 제안'일 뿐 최종 채택이 아닙니다.")
     print("    사후 표본 점검(이탈 392건 미달 구간 통합 여부)과 머신러닝")
-    print("    기반 교차검증 성능 비교는 분석 A 2단계(A_step2_methods, 추후 구현)")
-    print("    에서 수행됩니다. (기획구현.md 3번)")
+    print("    기반 교차검증 성능 비교는 분석 A 2단계에서 수행됩니다.")
+    print("    (기획구현.md 3번)")
 
     return {
         "df": df,
@@ -87,6 +91,68 @@ def run_step1(csv_path: str | Path = DEFAULT_CSV_PATH, criterion: str = "bic"):
     }
 
 
+def run_step2(
+    df_train,
+    pelt_result: "pelt.PeltResult",
+    n_cv_splits: int = 5,
+    n_bootstrap: int = 1000,
+):
+    """
+    분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합 실행.
+    1단계(run_step1) 결과를 그대로 입력받는다.
+
+    Returns
+    -------
+    A_step2_methods.run_step2.Step2Result
+    """
+    print()
+    print("=" * 70)
+    print("분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합")
+    print("=" * 70)
+    print(f"  (대상 후보 {len(pelt_result.candidates)}개, "
+          f"교차검증 {n_cv_splits}-fold, 부트스트랩 {n_bootstrap}회)")
+    print("  실행 중... (XGBoost 교차검증 + 부트스트랩은 다소 시간이 걸릴 수 있습니다)")
+
+    result = step2_module.run_step2(
+        df_train,
+        pelt_result,
+        n_cv_splits=n_cv_splits,
+        n_bootstrap=n_bootstrap,
+    )
+
+    print()
+    print(f"  - 표본충분성 임계값(검정력 분석, 1단계와 동일 출처): "
+          f"{result.min_group_churn_count}건")
+
+    print()
+    print("  [a. XGBoost 교차검증 성능 (K=1 베이스라인 포함)]")
+    cv_table = result.cv_table()
+    print(cv_table.to_string(index=False))
+
+    print()
+    print("  [b. 사후 표본 점검: 392건 미달 구간 통합 전/후 비교]")
+    merge_table = result.merge_summary_table()
+    print(merge_table.to_string(index=False))
+    for m in result.merge_results:
+        if m.merge_log:
+            print(f"    - 원본 경계 {m.original_boundaries}:")
+            for line in m.merge_log:
+                print(f"        · {line}")
+
+    print()
+    print("  [c. 부트스트랩 변동계수(CV) 요약 - K별 안정성]")
+    boot_table = result.bootstrap_table()
+    print(boot_table.to_string(index=False))
+
+    print()
+    print("  ※ 최종 K와 경계는 자동으로 채택하지 않습니다. 위 세 표(성능 /")
+    print("    통합결과 / CV안정성)를 사람이 종합 판단해 확정합니다.")
+    print("    (기획구현.md 4번-②: '임계값은 자동 탐지하지 않음')")
+
+    return result
+
+
 if __name__ == "__main__":
     csv_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CSV_PATH
-    run_step1(csv_path)
+    step1_out = run_step1(csv_path)
+    step2_out = run_step2(step1_out["df_train"], step1_out["pelt_result"])
