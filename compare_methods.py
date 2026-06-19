@@ -428,7 +428,7 @@ class ComparisonReporter:
 # 메인
 # ─────────────────────────────────────────────────────────────
 
-def main(csv_path: str = "/home/claude/WA_Fn-UseC_-Telco-Customer-Churn.csv") -> None:
+def main(csv_path: str = "WA_Fn-UseC_-Telco-Customer-Churn.csv") -> None:
     from tenure_binning import TenureBinner
 
     print("=" * 80)
