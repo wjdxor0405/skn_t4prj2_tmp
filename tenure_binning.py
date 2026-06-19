@@ -189,9 +189,47 @@ class TenureBinner:
         self._le = LabelEncoder()
 
     # ── 데이터 전처리 ──────────────────────────
-    def load_and_prepare(self, path: str) -> tuple[np.ndarray, np.ndarray]:
+    def load_and_prepare(
+            self,
+            path: str,
+            valid_range: tuple[float, float] = (0.0, 72.0),  # 데이터셋 명세 기준
+            na_strategy: str = "drop",  # "drop" | "median" | "mean"
+    ) -> tuple[np.ndarray, np.ndarray]:
+
         df = pd.read_csv(path)
+
+        # 1. 필수 컬럼 존재 확인
+        for col in [self.feature_col, self.target_col]:
+            if col not in df.columns:
+                raise KeyError(f"필수 컬럼 '{col}'이 데이터에 없습니다.")
+
+        # 2. tenure 타입 강제 변환 (문자열 "  " 등 포함 대비)
+        df[self.feature_col] = pd.to_numeric(df[self.feature_col], errors="coerce")
+
+        # 3. 범위 이탈값 → NaN으로 마킹
+        lo, hi = valid_range
+        out_of_range = ~df[self.feature_col].between(lo, hi, inclusive="both")
+        if out_of_range.any():
+            print(f"  [경고] 범위 이탈 {out_of_range.sum()}건 → NaN 처리")
+            df.loc[out_of_range, self.feature_col] = np.nan
+
+        # 4. NaN 처리
+        na_mask = df[self.feature_col].isna() | df[self.target_col].isna()
+        if na_mask.any():
+            print(f"  [경고] NaN {na_mask.sum()}건 감지")
+            if na_strategy == "drop":
+                df = df[~na_mask].reset_index(drop=True)
+                print(f"  → {na_mask.sum()}행 제거, 잔여 {len(df)}행")
+            elif na_strategy in ("median", "mean"):
+                fill_val = getattr(df[self.feature_col], na_strategy)()
+                df[self.feature_col] = df[self.feature_col].fillna(fill_val)
+                print(f"  → tenure NaN을 {na_strategy}({fill_val:.1f})로 대체")
+            else:
+                raise ValueError(f"na_strategy='{na_strategy}'는 지원하지 않습니다.")
+
+        # 5. Churn 인코딩
         df[self.target_col] = self._le.fit_transform(df[self.target_col])
+
         X = df[self.feature_col].values.astype(float)
         y = df[self.target_col].values
         return X, y
