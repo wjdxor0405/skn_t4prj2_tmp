@@ -128,7 +128,6 @@ class PELTBinner:
     PELT(Pruned Exact Linear Time) 알고리즘으로 최적 변화점 탐지.
     penalty 파라미터를 그리드 탐색하여 최적 분기점 집합 반환.
     """
-
     PARAM_GRID: list[dict[str, Any]] = [
         {"model": m, "penalty": p, "min_size": ms}
         for m  in ["rbf", "l2", "normal"]
