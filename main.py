@@ -106,6 +106,10 @@ def run_step2(
     분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합 실행.
     1단계(run_step1) 결과를 그대로 입력받는다.
 
+    실행 순서(정정 이력 참고): 사후 표본 점검(통합)을 먼저 수행해 최종
+    경계를 확정한 뒤, 그 최종 경계로 XGBoost 교차검증을 재실행한다
+    ("통합 후 재검증" -- 기획구현.md 3번 원문 그대로).
+
     Returns
     -------
     A_step2_methods.run_step2.Step2Result
@@ -130,12 +134,7 @@ def run_step2(
           f"{result.min_group_sample_size}명")
 
     print()
-    print("  [a. XGBoost 교차검증 성능 (K=1 베이스라인 포함)]")
-    cv_table = result.cv_table()
-    print(cv_table.to_string(index=False))
-
-    print()
-    print("  [b. 사후 표본 점검: '전체 표본 수' 393명 미달 구간 통합 전/후 비교]")
+    print("  [a. 사후 표본 점검: '전체 표본 수' 393명 미달 구간 통합]")
     merge_table = result.merge_summary_table()
     print(merge_table.to_string(index=False))
     for m in result.merge_results:
@@ -145,13 +144,22 @@ def run_step2(
                 print(f"        · {line}")
 
     print()
-    print("  [c. 부트스트랩 변동계수(CV) 요약 - K별 안정성]")
+    print("  [b. XGBoost 교차검증 성능 -- 위 a에서 확정한 '통합 후 최종 경계'를")
+    print("      재검증한 결과입니다 (통합 전 원본 경계가 아님, K=1 베이스라인 포함,")
+    print("      여러 후보가 같은 최종 구조로 수렴하면 중복 없이 1회만 표시)]")
+    cv_table = result.cv_table()
+    print(cv_table.to_string(index=False))
+
+    print()
+    print("  [c. 부트스트랩 변동계수(CV) 요약 -- 1단계가 제안한 원본 구조가")
+    print("      애초에 얼마나 불안정했는지 보여주는 참고지표입니다")
+    print("      (통합 전 원본 경계 기준, a/b와는 별개)]")
     boot_table = result.bootstrap_table()
     print(boot_table.to_string(index=False))
 
     print()
-    print("  ※ 최종 K와 경계는 자동으로 채택하지 않습니다. 위 세 표(성능 /")
-    print("    통합결과 / CV안정성)를 사람이 종합 판단해 확정합니다.")
+    print("  ※ 최종 K와 경계는 자동으로 채택하지 않습니다. 위 세 표(통합결과 /")
+    print("    성능 / CV안정성)를 사람이 종합 판단해 확정합니다.")
     print("    (기획구현.md 4번-②: '임계값은 자동 탐지하지 않음')")
 
     return result
