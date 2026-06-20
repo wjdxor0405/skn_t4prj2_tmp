@@ -1,21 +1,34 @@
 """
-실행 진입점.
-현재 구현 범위:
-  - 전처리 (기획구현.md 1~2번)
-  - 분석 A 1단계 - PELT 통계적 변화점 탐지 (기획구현.md 3번 1단계)
-  - 분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합 (기획구현.md 3번 2단계)
-  - 분석 A 대안 경로(A_ml_path) - 전원 머신러닝 경계 탐지 (선택 실행)
-    1단계(K-means/분위 클러스터링) -> 2단계(의사결정나무) -> 3단계(StratifiedKFold CV)
-    기존 통계 기반 경로(A_step1/A_step2)를 대체하지 않고 별도로 추가됐다.
-    기본 실행(`python main.py`)은 기존 경로만 돈다 -- 새 경로는
-    `python main.py --ml-path` 로 별도 실행하거나 run_ml_path_analysis()를
-    직접 호출해야 한다 (기존 코드 동작을 그대로 보존하기 위함).
+실행 진입점 (CLI, argparse 기반).
 
-분석 B, 보조 분석 Q, 예측모델 1·2·3단계(기획구현.md 5번)는 아직 작성하지 않는다.
+구현 범위:
+  - 전처리 (기획구현가이드 1~2번)
+  - 분석 A -- 두 가지 경로를 --method로 선택 실행
+      "pelt"         : 기존 PELT+BIC 통계 경로 (A_step1_methods/A_step2_methods)
+                       -- 비교군으로 보존, 코드 변경 없음
+      "pruning_tree" : 기획구현가이드(A,B확정판).md 확정 방법론
+                       (A_pruning_tree, ①②③ 반복 사이클)
+      "both"         : 두 경로 모두 실행 (기본값)
+  - 분석 A 대안 경로(A_ml_path, K-means/의사결정나무) -- 선택 실행(--ml-path)
+  - 모든 실행 결과는 results/ 폴더에 JSON으로 자동 저장된다.
+    -- visualize_results.py가 이 JSON만 읽어 그래프를 그리므로, 무거운
+       재계산 없이 나중에 언제든 결과를 다시 비교/시각화할 수 있다.
+
+사용 예:
+  python main.py                                  # 기본: pelt + pruning_tree 둘 다, 결과 저장
+  python main.py --method=pelt                    # PELT만
+  python main.py --method=pruning_tree             # 가지치기 회귀나무만
+  python main.py --method=pruning_tree --fast       # 빠른 설정(순열/부트스트랩 반복 축소, 개발용)
+  python main.py --ml-path                          # + 전원 머신러닝 대안 경로까지
+  python main.py --no-save                          # 결과 파일 저장 안 함
+  python main.py data/다른파일.csv                  # 다른 CSV 사용
+
+분석 B, 보조 분석 Q, 예측모델 1·2·3단계는 아직 작성하지 않는다.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -25,27 +38,26 @@ sys.path.append(str(PROJECT_ROOT / "src"))
 sys.path.append(str(PROJECT_ROOT / "A_step1_methods"))
 sys.path.append(str(PROJECT_ROOT / "A_step2_methods"))
 sys.path.append(str(PROJECT_ROOT / "A_ml_path"))
+sys.path.append(str(PROJECT_ROOT / "A_pruning_tree"))
 
 from src.preprocessing import run_preprocessing, split_train_test  # noqa: E402
 from A_step1_methods import pelt  # noqa: E402
 from A_step2_methods import run_step2 as step2_module  # noqa: E402
 from A_ml_path import run_ml_path as ml_path_module  # noqa: E402
+import run_cycle as pruning_cycle_module  # noqa: E402
+import step1_tree as pruning_step1_module  # noqa: E402
+import results_io  # noqa: E402
 
 DEFAULT_CSV_PATH = PROJECT_ROOT / "data" / "WA_FnUseC_TelcoCustomerChurn.csv"
 
 
-def run_step1(csv_path: str | Path = DEFAULT_CSV_PATH, criterion: str = "bic"):
-    """
-    전처리 -> Train/Test 분할 -> 분석 A 1단계(PELT) 실행.
-
-    Returns
-    -------
-    dict
-        df_train, df_test, pelt_result 를 담은 딕셔너리.
-        (이후 분석 A 2단계, 분석 B 등에서 그대로 이어받아 쓸 수 있도록)
-    """
+# ---------------------------------------------------------------------------
+# 전처리 (공통)
+# ---------------------------------------------------------------------------
+def run_preprocessing_step(csv_path: str | Path = DEFAULT_CSV_PATH):
+    """전처리 -> Train/Test 계층화 분할. 모든 경로가 공유하는 첫 단계."""
     print("=" * 70)
-    print("[1/3] 전처리 시작")
+    print("[전처리] 로드 -> 자료형 정리 -> 결측치 처리 -> 중복정보 통합")
     print("=" * 70)
     df = run_preprocessing(str(csv_path))
     print(f"  - 전체 데이터: {df.shape[0]}건, {df.shape[1]}개 컬럼")
@@ -54,191 +66,209 @@ def run_step1(csv_path: str | Path = DEFAULT_CSV_PATH, criterion: str = "bic"):
           f"({(df['Churn'] == 'Yes').mean():.1%})")
 
     print()
-    print("=" * 70)
-    print("[2/3] Train/Test 계층화 분할 (test_size=0.3)")
-    print("=" * 70)
+    print("[Train/Test 계층화 분할] test_size=0.3")
     df_train, df_test = split_train_test(df, test_size=0.3, random_state=42)
     print(f"  - Train: {df_train.shape[0]}건 / Test: {df_test.shape[0]}건")
     print(f"  - Train 이탈률: {(df_train['Churn'] == 'Yes').mean():.1%} / "
           f"Test 이탈률: {(df_test['Churn'] == 'Yes').mean():.1%}")
 
+    return df, df_train, df_test
+
+
+# ---------------------------------------------------------------------------
+# 경로 A: 기존 PELT 통계 경로 (비교군, 코드 변경 없음)
+# ---------------------------------------------------------------------------
+def run_pelt_path(df_train, criterion: str = "bic", n_cv_splits: int = 5, n_bootstrap: int = 1000):
+    """
+    기존 PELT+BIC 경로 (1단계 통계적 변화점 탐지 -> 2단계 머신러닝 검증).
+    A_step1_methods/A_step2_methods를 그대로 호출한다 (비교군, 변경 없음).
+    """
     print()
     print("=" * 70)
-    print(f"[3/3] 분석 A 1단계 - PELT 변화점 탐지 (criterion={criterion.upper()})")
+    print(f"[비교군] 분석 A - PELT 경로 (criterion={criterion.upper()})")
     print("=" * 70)
     pelt_result = pelt.run_pelt(df_train, criterion=criterion)
-
-    print(f"  - 검정력 분석 기반 표본충분성 기준(그룹당 '전체 표본 수', 참고치): "
-          f"{pelt_result.min_group_sample_size}명")
-    print(f"    -> 개월 환산 약 {pelt_result.min_segment_months_reference:.1f}개월, "
-          f"기술적 상한 K≈{pelt_result.technical_k_upper_bound:.1f}")
-    print(f"    (이 값은 1단계 PELT의 제약으로 쓰지 않습니다. 표본충분성")
-    print(f"     실제 판정은 2단계에서 '전체 표본 수' 기준으로 수행됩니다")
-    print(f"     -- 이탈 건수 기준이 아님에 유의. 표본충분성 논리 재검증 결과 반영)")
-    print(f"  - 1단계 PELT에 실제 사용된 min_size: {pelt_result.min_size_used}개월 "
-          f"(k_search_range 최대 K까지 후보가 나올 수 있도록 보장하는 느슨한 가드레일)")
-    print(f"  - 탐색한 K(세그먼트 수) 범위: {min(pelt_result.k_search_range)}"
-          f"~{max(pelt_result.k_search_range)}")
-    print(f"  - 실제 탐지된 후보 개수: {len(pelt_result.candidates)}개")
-    print()
-    print("  [K별 경계 후보 (tenure 개월 기준)]")
-    summary = pelt_result.summary_table()
-    if summary.empty:
-        print("  (탐색 범위 내에서 후보를 찾지 못했습니다. "
-              "k_search_range 또는 penalty scale 범위를 조정하세요.)")
-    else:
-        for _, row in summary.iterrows():
-            print(f"    K={row['n_segments']}: 경계 tenure = {row['boundaries_tenure']}")
+    print(f"  - 탐지된 K 후보: {len(pelt_result.candidates)}개")
+    print(pelt_result.summary_table().to_string(index=False))
 
     print()
-    print("  ※ 위 후보들은 '통계적 제안'일 뿐 최종 채택이 아닙니다.")
-    print("    사후 표본 점검('전체 표본 수' 393명 미달 구간 통합 여부)과")
-    print("    머신러닝 기반 교차검증 성능 비교는 분석 A 2단계에서 수행됩니다.")
-    print("    (기획구현.md 3번)")
+    print("  [2단계: 사후 표본 점검 + XGBoost 재검증]")
+    step2_result = step2_module.run_step2(
+        df_train, pelt_result, n_cv_splits=n_cv_splits, n_bootstrap=n_bootstrap
+    )
+    print(step2_result.merge_summary_table().to_string(index=False))
+    print()
+    print(step2_result.cv_table().to_string(index=False))
 
-    return {
-        "df": df,
-        "df_train": df_train,
-        "df_test": df_test,
-        "pelt_result": pelt_result,
+    payload = {
+        "pelt_step1": {
+            "criterion": pelt_result.criterion,
+            "min_group_sample_size": pelt_result.min_group_sample_size,
+            "min_size_used": pelt_result.min_size_used,
+            "k_search_range": list(pelt_result.k_search_range),
+            "candidates": [
+                {
+                    "n_breakpoints": c.n_breakpoints,
+                    "boundaries_tenure": c.boundaries_tenure,
+                    "penalty_used": c.penalty_used,
+                }
+                for c in pelt_result.candidates
+            ],
+        },
+        "step2_merge": step2_result.merge_summary_table().to_dict(orient="records"),
+        "step2_cv": step2_result.cv_table().to_dict(orient="records"),
+        "step2_bootstrap": step2_result.bootstrap_table().to_dict(orient="records"),
     }
+    return pelt_result, step2_result, payload
 
 
-def run_step2(
+# ---------------------------------------------------------------------------
+# 경로 B: 가지치기 회귀나무 ①②③ 반복 사이클 (확정판 메인 방법론)
+# ---------------------------------------------------------------------------
+def run_pruning_tree_path(
     df_train,
-    pelt_result: "pelt.PeltResult",
-    n_cv_splits: int = 5,
-    n_bootstrap: int = 1000,
+    n_permutations: int = 200,
+    n_bootstrap: int = 200,
+    max_iterations: int = 10,
 ):
     """
-    분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합 실행.
-    1단계(run_step1) 결과를 그대로 입력받는다.
-
-    실행 순서(정정 이력 참고): 사후 표본 점검(통합)을 먼저 수행해 최종
-    경계를 확정한 뒤, 그 최종 경계로 XGBoost 교차검증을 재실행한다
-    ("통합 후 재검증" -- 기획구현.md 3번 원문 그대로).
-
-    Returns
-    -------
-    A_step2_methods.run_step2.Step2Result
+    기획구현가이드(A,B확정판).md 확정 방법론.
+    ① 가지치기 회귀나무(+RF 투표 보조) -> ② 세그먼트단독 AUC+순열검정
+    -> ③ AUC 부트스트랩 신뢰구간, 실패 시 ①부터 재실행하는 반복 사이클.
     """
     print()
     print("=" * 70)
-    print("분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합")
+    print("[메인] 분석 A - 가지치기 회귀나무 ①②③ 반복 사이클")
     print("=" * 70)
-    print(f"  (대상 후보 {len(pelt_result.candidates)}개, "
-          f"교차검증 {n_cv_splits}-fold, 부트스트랩 {n_bootstrap}회)")
-    print("  실행 중... (XGBoost 교차검증 + 부트스트랩은 다소 시간이 걸릴 수 있습니다)")
+    print(f"  (순열검정 {n_permutations}회, 부트스트랩 {n_bootstrap}회, "
+          f"최대 반복 {max_iterations}회)")
+    print("  실행 중... (순열검정/부트스트랩은 다소 시간이 걸릴 수 있습니다)")
 
-    result = step2_module.run_step2(
+    result = pruning_cycle_module.run_cycle(
         df_train,
-        pelt_result,
-        n_cv_splits=n_cv_splits,
+        n_permutations=n_permutations,
         n_bootstrap=n_bootstrap,
+        max_iterations=max_iterations,
     )
 
     print()
-    print(f"  - 표본충분성 임계값('전체 표본 수' 기준, 1단계와 동일 출처): "
-          f"{result.min_group_sample_size}명")
-
+    print(f"  - 수렴 여부: {result.converged} (종료 사유: {result.stop_reason})")
+    print(f"  - 최종 경계: {result.final_boundaries}")
     print()
-    print("  [a. 사후 표본 점검: '전체 표본 수' 393명 미달 구간 통합]")
-    merge_table = result.merge_summary_table()
-    print(merge_table.to_string(index=False))
-    for m in result.merge_results:
-        if m.merge_log:
-            print(f"    - 원본 경계 {m.original_boundaries}:")
-            for line in m.merge_log:
-                print(f"        · {line}")
+    print("  [회차별 진행 기록]")
+    print(pruning_cycle_module.cycle_summary_table(result).to_string(index=False))
 
-    print()
-    print("  [b. XGBoost 교차검증 성능 -- 위 a에서 확정한 '통합 후 최종 경계'를")
-    print("      재검증한 결과입니다 (통합 전 원본 경계가 아님, K=1 베이스라인 포함,")
-    print("      여러 후보가 같은 최종 구조로 수렴하면 중복 없이 1회만 표시)]")
-    cv_table = result.cv_table()
-    print(cv_table.to_string(index=False))
+    if result.converged and result.iterations:
+        last = result.iterations[-1]
+        print()
+        print("  [최종 회차: ① RF 투표와의 일치성 점검]")
+        agreement = pruning_step1_module.check_rf_agreement(
+            last.step1_result.best_alpha, last.step1_result.rf_vote
+        )
+        print(agreement.to_string(index=False))
 
-    print()
-    print("  [c. 부트스트랩 변동계수(CV) 요약 -- 1단계가 제안한 원본 구조가")
-    print("      애초에 얼마나 불안정했는지 보여주는 참고지표입니다")
-    print("      (통합 전 원본 경계 기준, a/b와는 별개)]")
-    boot_table = result.bootstrap_table()
-    print(boot_table.to_string(index=False))
-
-    print()
-    print("  ※ 최종 K와 경계는 자동으로 채택하지 않습니다. 위 세 표(통합결과 /")
-    print("    성능 / CV안정성)를 사람이 종합 판단해 확정합니다.")
-    print("    (기획구현.md 4번-②: '임계값은 자동 탐지하지 않음')")
-
-    return result
+    payload = pruning_cycle_module.cycle_result_to_dict(result)
+    return result, payload
 
 
-def run_ml_path_analysis(
-    df_train,
-    k_search_range: range | None = None,
-    density_method: str = "kmeans",
-    n_cv_splits: int = 5,
-):
-    """
-    분석 A 대안 경로 - 전원 머신러닝(All-ML) 경계 탐지 실행.
-
-    기존 통계 기반 경로(run_step1 -> run_step2)와는 독립적인 경로다.
-    1단계(K-means/분위 클러스터링, 쏠림 해결) -> 2단계(의사결정나무,
-    경계선 추출) -> 3단계(StratifiedKFold 교차검증, ROC-AUC/F1 검증)
-    순서로 실행되며, 통계 공식(p-value, 검정력 분석 등)을 전혀 쓰지
-    않는다.
-
-    Returns
-    -------
-    A_ml_path.run_ml_path.MLPathResult
-    """
+# ---------------------------------------------------------------------------
+# 경로 C: 전원 머신러닝 대안 경로 (선택 실행, 기존 그대로)
+# ---------------------------------------------------------------------------
+def run_ml_path_analysis(df_train, k_search_range=None, density_method: str = "kmeans", n_cv_splits: int = 5):
+    """분석 A 대안 경로 - 전원 머신러닝(All-ML) 경계 탐지 실행 (선택 사항)."""
     print()
     print("=" * 70)
-    print("분석 A 대안 경로 - 전원 머신러닝(All-ML) 경계 탐지")
+    print("[대안 경로] 분석 A - 전원 머신러닝(All-ML) 경계 탐지")
     print("=" * 70)
-    print("  1단계(K-means/분위 클러스터링, 쏠림 해결) -> 2단계(의사결정나무,")
-    print("  경계선 추출) -> 3단계(StratifiedKFold CV, ROC-AUC/F1 검증)")
-    print("  ※ 기존 통계 기반 경로(PELT+BIC, XGBoost 검증)와는 별도이며,")
-    print("    서로를 대체하지 않습니다. 두 경로의 결과를 비교해보세요.")
-    print()
 
     result = ml_path_module.run_ml_path(
-        df_train,
-        k_search_range=k_search_range,
-        density_method=density_method,
-        n_cv_splits=n_cv_splits,
+        df_train, k_search_range=k_search_range, density_method=density_method, n_cv_splits=n_cv_splits
     )
-
-    print(f"  [1단계: 밀도 분할 ({density_method})]")
-    print("  (쏠림이 실제로 해소됐는지 cluster_sizes로 확인 가능)")
-    print(result.density_summary_table().to_string(index=False))
-
-    print()
-    print("  [2단계: 의사결정나무로 추출한 경계]")
-    print(result.tree_summary_table().to_string(index=False))
-
-    print()
-    print("  [3단계: StratifiedKFold 교차검증 (통계 공식 미사용, ROC-AUC/F1만 사용)]")
     print(result.cv_table().to_string(index=False))
 
-    print()
-    best = result.best_by_roc_auc
-    print(f"  ※ 참고용 추천(ROC-AUC 최고): K={best.n_segments}, "
-          f"경계={best.boundaries_tenure}, ROC-AUC={best.mean_scores['roc_auc']:.4f}")
-    print("    이는 참고용 추천일 뿐 자동 채택이 아닙니다 -- 위 표 전체를")
-    print("    사람이 비교해 최종 K를 판단하세요.")
+    payload = {
+        "density": result.density_summary_table().to_dict(orient="records"),
+        "tree": result.tree_summary_table().to_dict(orient="records"),
+        "cv": result.cv_table().to_dict(orient="records"),
+    }
+    return result, payload
 
-    return result
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="가입 고객 이탈 예측 - 분석 A 실행 (PELT 비교군 vs 가지치기 회귀나무 확정 방법론)"
+    )
+    parser.add_argument(
+        "csv_path", nargs="?", default=str(DEFAULT_CSV_PATH),
+        help="입력 CSV 경로 (기본: data/WA_FnUseC_TelcoCustomerChurn.csv)",
+    )
+    parser.add_argument(
+        "--method", choices=["pelt", "pruning_tree", "both"], default="both",
+        help="실행할 분석 A 방법론 (기본: both)",
+    )
+    parser.add_argument(
+        "--ml-path", action="store_true",
+        help="전원 머신러닝 대안 경로(K-means->의사결정나무)도 함께 실행",
+    )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="개발/디버깅용 빠른 설정 (순열검정/부트스트랩 반복 횟수를 대폭 축소)",
+    )
+    parser.add_argument(
+        "--n-permutations", type=int, default=None,
+        help="② 순열검정 반복 횟수 (기본 200, --fast 시 30)",
+    )
+    parser.add_argument(
+        "--n-bootstrap", type=int, default=None,
+        help="③ 부트스트랩 반복 횟수 (기본 200, --fast 시 30)",
+    )
+    parser.add_argument(
+        "--no-save", action="store_true",
+        help="결과를 results/ 폴더에 JSON으로 저장하지 않음 (기본은 저장함)",
+    )
+    return parser
+
+
+def main():
+    parser = build_arg_parser()
+    args = parser.parse_args()
+
+    n_permutations = args.n_permutations if args.n_permutations is not None else (30 if args.fast else 200)
+    n_bootstrap = args.n_bootstrap if args.n_bootstrap is not None else (30 if args.fast else 200)
+    save_results = not args.no_save
+
+    df, df_train, df_test = run_preprocessing_step(args.csv_path)
+
+    if args.method in ("pelt", "both"):
+        pelt_result, step2_result, pelt_payload = run_pelt_path(df_train)
+        if save_results:
+            path = results_io.save_result("pelt", pelt_payload)
+            print(f"\n  [저장됨] {path}")
+
+    if args.method in ("pruning_tree", "both"):
+        cycle_result, tree_payload = run_pruning_tree_path(
+            df_train, n_permutations=n_permutations, n_bootstrap=n_bootstrap
+        )
+        if save_results:
+            path = results_io.save_result("pruning_tree", tree_payload)
+            print(f"\n  [저장됨] {path}")
+
+    if args.ml_path:
+        ml_result, ml_payload = run_ml_path_analysis(df_train)
+        if save_results:
+            path = results_io.save_result("ml_path", ml_payload)
+            print(f"\n  [저장됨] {path}")
+
+    if save_results:
+        print()
+        print("=" * 70)
+        print("결과가 results/ 폴더에 저장됐습니다.")
+        print("나중에 시각화하려면: python visualize_results.py")
+        print("=" * 70)
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    use_ml_path = "--ml-path" in sys.argv
-
-    csv_path = args[0] if args else DEFAULT_CSV_PATH
-
-    step1_out = run_step1(csv_path)
-    step2_out = run_step2(step1_out["df_train"], step1_out["pelt_result"])
-
-    if use_ml_path:
-        ml_path_out = run_ml_path_analysis(step1_out["df_train"])
+    main()

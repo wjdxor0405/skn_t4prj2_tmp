@@ -6,3 +6,8 @@ output/
 data/
 
 */__pycache__/
+__pycache__/
+
+__figures__/
+*.png
+*.json
