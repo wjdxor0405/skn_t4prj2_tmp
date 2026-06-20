@@ -4,6 +4,12 @@
   - 전처리 (기획구현.md 1~2번)
   - 분석 A 1단계 - PELT 통계적 변화점 탐지 (기획구현.md 3번 1단계)
   - 분석 A 2단계 - 머신러닝 기반 표본충분성 검증 + 사후 통합 (기획구현.md 3번 2단계)
+  - 분석 A 대안 경로(A_ml_path) - 전원 머신러닝 경계 탐지 (선택 실행)
+    1단계(K-means/분위 클러스터링) -> 2단계(의사결정나무) -> 3단계(StratifiedKFold CV)
+    기존 통계 기반 경로(A_step1/A_step2)를 대체하지 않고 별도로 추가됐다.
+    기본 실행(`python main.py`)은 기존 경로만 돈다 -- 새 경로는
+    `python main.py --ml-path` 로 별도 실행하거나 run_ml_path_analysis()를
+    직접 호출해야 한다 (기존 코드 동작을 그대로 보존하기 위함).
 
 분석 B, 보조 분석 Q, 예측모델 1·2·3단계(기획구현.md 5번)는 아직 작성하지 않는다.
 """
@@ -18,12 +24,14 @@ sys.path.append(str(PROJECT_ROOT))
 sys.path.append(str(PROJECT_ROOT / "src"))
 sys.path.append(str(PROJECT_ROOT / "A_step1_methods"))
 sys.path.append(str(PROJECT_ROOT / "A_step2_methods"))
+sys.path.append(str(PROJECT_ROOT / "A_ml_path"))
 
 from src.preprocessing import run_preprocessing, split_train_test  # noqa: E402
 from A_step1_methods import pelt  # noqa: E402
 from A_step2_methods import run_step2 as step2_module  # noqa: E402
+from A_ml_path import run_ml_path as ml_path_module  # noqa: E402
 
-DEFAULT_CSV_PATH = PROJECT_ROOT / "data" / "WA_Fn-UseC_-Telco-Customer-Churn.csv"
+DEFAULT_CSV_PATH = PROJECT_ROOT / "data" / "WA_FnUseC_TelcoCustomerChurn.csv"
 
 
 def run_step1(csv_path: str | Path = DEFAULT_CSV_PATH, criterion: str = "bic"):
@@ -165,7 +173,72 @@ def run_step2(
     return result
 
 
+def run_ml_path_analysis(
+    df_train,
+    k_search_range: range | None = None,
+    density_method: str = "kmeans",
+    n_cv_splits: int = 5,
+):
+    """
+    분석 A 대안 경로 - 전원 머신러닝(All-ML) 경계 탐지 실행.
+
+    기존 통계 기반 경로(run_step1 -> run_step2)와는 독립적인 경로다.
+    1단계(K-means/분위 클러스터링, 쏠림 해결) -> 2단계(의사결정나무,
+    경계선 추출) -> 3단계(StratifiedKFold 교차검증, ROC-AUC/F1 검증)
+    순서로 실행되며, 통계 공식(p-value, 검정력 분석 등)을 전혀 쓰지
+    않는다.
+
+    Returns
+    -------
+    A_ml_path.run_ml_path.MLPathResult
+    """
+    print()
+    print("=" * 70)
+    print("분석 A 대안 경로 - 전원 머신러닝(All-ML) 경계 탐지")
+    print("=" * 70)
+    print("  1단계(K-means/분위 클러스터링, 쏠림 해결) -> 2단계(의사결정나무,")
+    print("  경계선 추출) -> 3단계(StratifiedKFold CV, ROC-AUC/F1 검증)")
+    print("  ※ 기존 통계 기반 경로(PELT+BIC, XGBoost 검증)와는 별도이며,")
+    print("    서로를 대체하지 않습니다. 두 경로의 결과를 비교해보세요.")
+    print()
+
+    result = ml_path_module.run_ml_path(
+        df_train,
+        k_search_range=k_search_range,
+        density_method=density_method,
+        n_cv_splits=n_cv_splits,
+    )
+
+    print(f"  [1단계: 밀도 분할 ({density_method})]")
+    print("  (쏠림이 실제로 해소됐는지 cluster_sizes로 확인 가능)")
+    print(result.density_summary_table().to_string(index=False))
+
+    print()
+    print("  [2단계: 의사결정나무로 추출한 경계]")
+    print(result.tree_summary_table().to_string(index=False))
+
+    print()
+    print("  [3단계: StratifiedKFold 교차검증 (통계 공식 미사용, ROC-AUC/F1만 사용)]")
+    print(result.cv_table().to_string(index=False))
+
+    print()
+    best = result.best_by_roc_auc
+    print(f"  ※ 참고용 추천(ROC-AUC 최고): K={best.n_segments}, "
+          f"경계={best.boundaries_tenure}, ROC-AUC={best.mean_scores['roc_auc']:.4f}")
+    print("    이는 참고용 추천일 뿐 자동 채택이 아닙니다 -- 위 표 전체를")
+    print("    사람이 비교해 최종 K를 판단하세요.")
+
+    return result
+
+
 if __name__ == "__main__":
-    csv_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CSV_PATH
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    use_ml_path = "--ml-path" in sys.argv
+
+    csv_path = args[0] if args else DEFAULT_CSV_PATH
+
     step1_out = run_step1(csv_path)
     step2_out = run_step2(step1_out["df_train"], step1_out["pelt_result"])
+
+    if use_ml_path:
+        ml_path_out = run_ml_path_analysis(step1_out["df_train"])
