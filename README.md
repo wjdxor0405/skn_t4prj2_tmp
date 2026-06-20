@@ -1,3 +1,5 @@
+pip install scikit-learn
+pip install ruptures
 pip install statsmodels
 pip install xgboost
 

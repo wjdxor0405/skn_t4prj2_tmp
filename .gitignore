@@ -4,3 +4,5 @@ input/
 output/
 .idea/
 data/
+
+*/__pycache__/
